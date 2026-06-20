@@ -81,7 +81,7 @@ A selection of generated images and plots was copied into `output/` for easier r
 
 ## Demo Result Summary
 The sample run showed strong acceleration from the parallel versions:
-- CUDA speedup: ~45.4x for 4K input and ~45.0x for 8K input
-- Best OpenMP speedup: ~11.3x for 16 threads
+- CUDA speedup: 4.17x for 8K input, 1.24x for 4K input
+- Best OpenMP speedup: 4.98x with 32 threads (8K), 4.79x with 32 threads (4K)
+- OpenMP (16 threads) speedup: 4.35x (8K) and 3.84x (4K)
 
-Open the generated `report_20260620_153314/report.html` to review the full analysis, images, and plots.
