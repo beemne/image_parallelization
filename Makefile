@@ -1,48 +1,59 @@
+# Simple Makefile - easier to debug
 CXX = g++
 NVCC = nvcc
-CXXFLAGS = -O3 -march=native -mtune=native -Wall -Wextra -std=c++17 -fopenmp
-CUDAFLAGS = -O3 --use_fast_math -arch=sm_75
-LDFLAGS = -fopenmp -lpthread
 
-SOURCES_SEQ = src/sequential/pipeline_seq.cpp src/common/image_io.cpp
-SOURCES_OMP = src/openmp/pipeline_omp.cpp src/common/image_io.cpp
-SOURCES_CUDA = src/cuda/pipeline_cuda.cu src/common/image_io.cpp
+# Compiler flags
+CXXFLAGS = -O3 -march=native -mtune=native -std=c++17 -fopenmp
+CXXFLAGS += -Wall -Wextra -Wpedantic
 
+# CUDA flags (adjust architecture for your GPU)
+# Common: sm_75 (RTX 20xx), sm_80 (RTX 30xx), sm_89 (RTX 40xx)
+CUDAFLAGS = -O3 --use_fast_math -std=c++14 -arch=sm_75
+
+LDFLAGS = -fopenmp -lpthread -lcudart
+
+# Source files
+COMMON_SRC = src/common/image_io.cpp
+SEQ_SRC = src/sequential/pipeline_seq.cpp $(COMMON_SRC)
+OMP_SRC = src/openmp/pipeline_omp.cpp $(COMMON_SRC)
+CUDA_SRC = src/cuda/pipeline_cuda.cu $(COMMON_SRC)
+BENCH_SRC = src/profiling/benchmark.cpp $(COMMON_SRC) src/openmp/pipeline_omp.cpp
+
+# Include directories
+INCLUDES = -Iinclude -Isrc/cuda
+
+# Targets
 TARGETS = sequential omp_pipeline cuda_pipeline benchmark
 
 all: $(TARGETS)
 
-sequential: $(SOURCES_SEQ)
-	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
+sequential: $(SEQ_SRC)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -o $@ $^ $(LDFLAGS)
 
-omp_pipeline: $(SOURCES_OMP)
-	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
+omp_pipeline: $(OMP_SRC)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -o $@ $^ $(LDFLAGS)
 
-cuda_pipeline: $(SOURCES_CUDA)
-	$(NVCC) $(CUDAFLAGS) -o $@ $^
+cuda_pipeline: $(CUDA_SRC)
+	$(NVCC) $(CUDAFLAGS) $(INCLUDES) -o $@ $^
 
-benchmark: $(SOURCES_OMP) src/profiling/benchmark.cpp
-	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
+benchmark: $(BENCH_SRC)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -o $@ $^ $(LDFLAGS)
 
 clean:
 	rm -f $(TARGETS) datasets/output/*.ppm
 
-run-sequential: sequential
-	./sequential datasets/input/test_4k.ppm datasets/output/out_seq.ppm
+# Run targets
+run-seq: sequential
+	./sequential --size 1920x1080 --generate test.ppm
+	./sequential -i test.ppm -o out_seq.ppm
 
 run-omp: omp_pipeline
-	./omp_pipeline datasets/input/test_4k.ppm datasets/output/out_omp.ppm 8 tiled
+	./omp_pipeline -i test.ppm -o out_omp.ppm -t 16 -d tiled
 
 run-cuda: cuda_pipeline
-	./cuda_pipeline datasets/input/test_4k.ppm datasets/output/out_cuda.ppm
+	./cuda_pipeline -i test.ppm -o out_cuda.ppm
 
-bench: benchmark
-	./benchmark --all --output results.json
+run-all: run-seq run-omp run-cuda
+	@echo "All runs complete!"
 
-profile-cpu:
-	perf stat -e cycles,instructions,cache-misses,cache-references ./omp_pipeline datasets/input/test_8k.ppm /dev/null 16 tiled
-
-profile-gpu:
-	nsys profile --stats=true ./cuda_pipeline datasets/input/test_8k.ppm /dev/null
-
-.PHONY: all clean run-sequential run-omp run-cuda bench profile-cpu profile-gpu
+.PHONY: all clean run-seq run-omp run-cuda run-all

@@ -6,6 +6,7 @@
 #include <cmath>
 #include <algorithm>
 #include <chrono>
+#include <omp.h>
 
 // Image structure
 struct Image {
@@ -30,7 +31,7 @@ struct Image {
     }
 };
 
-// Gaussian Blur Kernel (5x5 for higher computational density)
+// Gaussian Blur Kernel (5x5)
 class GaussianBlur {
 private:
     static constexpr int KERNEL_SIZE = 5;
@@ -46,7 +47,6 @@ private:
                 sum += value;
             }
         }
-        // Normalize
         for (int i = 0; i < KERNEL_SIZE; ++i)
             for (int j = 0; j < KERNEL_SIZE; ++j)
                 kernel[i][j] /= sum;
@@ -58,7 +58,7 @@ public:
     }
     
     void apply(const Image& input, Image& output) const {
-        #pragma omp parallel for collapse(2) if(false)  // Sequential for baseline
+        #pragma omp parallel for collapse(2) if(false)
         for (int y = KERNEL_RADIUS; y < input.height - KERNEL_RADIUS; ++y) {
             for (int x = KERNEL_RADIUS; x < input.width - KERNEL_RADIUS; ++x) {
                 for (int c = 0; c < input.channels; ++c) {
@@ -84,7 +84,6 @@ private:
     
 public:
     void apply(const Image& input, Image& output) {
-        // Convert to grayscale if needed
         Image gray(input.width, input.height, 1);
         if (input.channels == 3) {
             for (int y = 0; y < input.height; ++y) {
@@ -99,7 +98,6 @@ public:
             gray = input;
         }
         
-        // Apply Sobel
         for (int y = 1; y < gray.height - 1; ++y) {
             for (int x = 1; x < gray.width - 1; ++x) {
                 float gx = 0.0f, gy = 0.0f;
@@ -117,7 +115,7 @@ public:
     }
 };
 
-// Complete Pipeline: Gaussian Blur + Sobel Edge Detection
+// Complete Pipeline
 class ImageProcessingPipeline {
 private:
     GaussianBlur gaussian;
@@ -127,17 +125,13 @@ public:
     ImageProcessingPipeline(float sigma = 1.4f) : gaussian(sigma) {}
     
     void process(const Image& input, Image& output) {
-        // Step 1: Apply Gaussian blur
         Image blurred(input.width, input.height, input.channels);
         gaussian.apply(input, blurred);
-        
-        // Step 2: Apply Sobel edge detection
         sobel.apply(blurred, output);
     }
     
     void processSequential(const Image& input, Image& output) {
-        // Force sequential execution for baseline
-        auto old_state = omp_get_max_threads();
+        int old_state = omp_get_max_threads();
         omp_set_num_threads(1);
         process(input, output);
         omp_set_num_threads(old_state);

@@ -1,0 +1,496 @@
+#!/bin/bash
+# ============================================
+# COMPLETE BENCHMARK + PLOT GENERATION
+# Runs all tests and generates IEEE-ready plots
+# ============================================
+
+cd /home/beemineta/image_parallelization
+
+TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+RESULTS_DIR="results"
+PLOTS_DIR="${RESULTS_DIR}/plots_${TIMESTAMP}"
+CSV_FILE="${RESULTS_DIR}/benchmark_results_${TIMESTAMP}.csv"
+
+mkdir -p "${RESULTS_DIR}" "${PLOTS_DIR}" datasets/output
+
+echo "=========================================="
+echo "  COMPLETE BENCHMARK + PLOT GENERATION"
+echo "  Run ID: ${TIMESTAMP}"
+echo "=========================================="
+
+# ============================================
+# STEP 1: GENERATE INPUT IMAGES (if needed)
+# ============================================
+
+echo -e "\n[1/6] Checking input images..."
+
+if [ ! -f "datasets/input/4k.ppm" ] || [ ! -s "datasets/input/4k.ppm" ]; then
+    echo "  Generating 4K image..."
+    ./build/sequential --size 3840x2160 --generate datasets/input/4k.ppm
+fi
+
+if [ ! -f "datasets/input/8k.ppm" ] || [ ! -s "datasets/input/8k.ppm" ]; then
+    echo "  Generating 8K image..."
+    ./build/sequential --size 7680x4320 --generate datasets/input/8k.ppm
+fi
+
+echo "  ✅ Input images ready"
+
+# ============================================
+# STEP 2: RUN BENCHMARKS
+# ============================================
+
+echo -e "\n[2/6] Running benchmarks..."
+
+# Function to run and capture time
+run_benchmark() {
+    local name="$1"
+    local cmd="$2"
+    
+    echo -n "    Running $name... "
+    
+    local start_time=$(date +%s%N)
+    eval $cmd > /dev/null 2>&1
+    local end_time=$(date +%s%N)
+    
+    local time_ms=$(( (end_time - start_time) / 1000000 ))
+    echo "${time_ms} ms"
+    echo "$time_ms"
+}
+
+# ============================================
+# 4K BENCHMARKS
+# ============================================
+
+echo -e "\n  === 4K Benchmarks (3840x2160) ==="
+
+# Sequential 4K
+SEQ_4K=$(run_benchmark "Sequential 4K" \
+    "./build/sequential -i datasets/input/4k.ppm -o datasets/output/4k_seq.ppm")
+
+# OpenMP 4K (various thread counts)
+declare -A OMP_4K
+for t in 1 2 4 8 16 32; do
+    if [ $t -le $(nproc) ]; then
+        time_ms=$(run_benchmark "OpenMP ${t}T 4K" \
+            "./build/omp_pipeline -i datasets/input/4k.ppm -o datasets/output/4k_omp_${t}.ppm -t ${t} -d tiled")
+        OMP_4K[$t]=$time_ms
+    fi
+done
+
+# CUDA 4K
+CUDA_4K=$(run_benchmark "CUDA 4K" \
+    "./build/cuda_pipeline -i datasets/input/4k.ppm -o datasets/output/4k_cuda.ppm")
+
+# ============================================
+# 8K BENCHMARKS
+# ============================================
+
+echo -e "\n  === 8K Benchmarks (7680x4320) ==="
+
+# Sequential 8K
+SEQ_8K=$(run_benchmark "Sequential 8K" \
+    "./build/sequential -i datasets/input/8k.ppm -o datasets/output/8k_seq.ppm")
+
+# OpenMP 8K
+declare -A OMP_8K
+for t in 1 2 4 8 16 32; do
+    if [ $t -le $(nproc) ]; then
+        time_ms=$(run_benchmark "OpenMP ${t}T 8K" \
+            "./build/omp_pipeline -i datasets/input/8k.ppm -o datasets/output/8k_omp_${t}.ppm -t ${t} -d tiled")
+        OMP_8K[$t]=$time_ms
+    fi
+done
+
+# CUDA 8K
+CUDA_8K=$(run_benchmark "CUDA 8K" \
+    "./build/cuda_pipeline -i datasets/input/8k.ppm -o datasets/output/8k_cuda.ppm")
+
+# ============================================
+# STEP 3: GENERATE CSV
+# ============================================
+
+echo -e "\n[3/6] Generating CSV..."
+
+cat > "${CSV_FILE}" << 'EOF'
+Implementation,Image,Resolution,Threads,Time_ms,Speedup,Efficiency
+EOF
+
+# Helper function to add row
+add_row() {
+    local impl="$1"
+    local image="$2"
+    local res="$3"
+    local threads="$4"
+    local time_ms="$5"
+    local seq_time="$6"
+    
+    if [ -z "$time_ms" ] || [ "$time_ms" = "0" ]; then
+        return
+    fi
+    
+    local speedup=$(echo "scale=2; ${seq_time} / ${time_ms}" | bc -l 2>/dev/null || echo "1.00")
+    local efficiency=""
+    if [ "$threads" -gt 1 ] && [ "$impl" != "CUDA" ] && [ "$impl" != "Sequential" ]; then
+        efficiency=$(echo "scale=2; ${speedup} / ${threads} * 100" | bc -l 2>/dev/null || echo "0")
+    else
+        efficiency="0"
+    fi
+    
+    echo "${impl},${image},${res},${threads},${time_ms},${speedup},${efficiency}" >> "${CSV_FILE}"
+}
+
+# Add 4K rows
+add_row "Sequential" "4K" "3840x2160" "1" "${SEQ_4K}" "${SEQ_4K}"
+
+for t in 1 2 4 8 16 32; do
+    if [ ! -z "${OMP_4K[$t]}" ] && [ "${OMP_4K[$t]}" != "0" ]; then
+        add_row "OpenMP" "4K" "3840x2160" "${t}" "${OMP_4K[$t]}" "${SEQ_4K}"
+    fi
+done
+
+add_row "CUDA" "4K" "3840x2160" "1" "${CUDA_4K}" "${SEQ_4K}"
+
+# Add 8K rows
+add_row "Sequential" "8K" "7680x4320" "1" "${SEQ_8K}" "${SEQ_8K}"
+
+for t in 1 2 4 8 16 32; do
+    if [ ! -z "${OMP_8K[$t]}" ] && [ "${OMP_8K[$t]}" != "0" ]; then
+        add_row "OpenMP" "8K" "7680x4320" "${t}" "${OMP_8K[$t]}" "${SEQ_8K}"
+    fi
+done
+
+add_row "CUDA" "8K" "7680x4320" "1" "${CUDA_8K}" "${SEQ_8K}"
+
+echo "  ✅ CSV saved: ${CSV_FILE}"
+echo ""
+echo "  Data Summary:"
+echo "    Sequential 4K: ${SEQ_4K} ms"
+echo "    OpenMP 16T 4K: ${OMP_4K[16]} ms"
+echo "    CUDA 4K: ${CUDA_4K} ms"
+echo "    Sequential 8K: ${SEQ_8K} ms"
+echo "    OpenMP 16T 8K: ${OMP_8K[16]} ms"
+echo "    CUDA 8K: ${CUDA_8K} ms"
+
+# ============================================
+# STEP 4: GENERATE PLOTS FROM CSV
+# ============================================
+
+echo -e "\n[4/6] Generating plots from CSV..."
+
+python3 << 'PYTHON'
+import pandas as pd
+import matplotlib.pyplot as plt
+import numpy as np
+import os
+import sys
+
+# Get CSV file from environment
+csv_file = os.environ.get('CSV_FILE')
+plots_dir = os.environ.get('PLOTS_DIR')
+
+if not csv_file or not plots_dir:
+    print("❌ Environment variables not set")
+    sys.exit(1)
+
+if not os.path.exists(csv_file):
+    print(f"❌ CSV not found: {csv_file}")
+    sys.exit(1)
+
+# Read CSV
+try:
+    df = pd.read_csv(csv_file)
+    print(f"✅ Read {len(df)} rows from {csv_file}")
+except Exception as e:
+    print(f"❌ Error reading CSV: {e}")
+    sys.exit(1)
+
+os.makedirs(plots_dir, exist_ok=True)
+
+# Extract data
+df_4k = df[df['Image'] == '4K']
+df_8k = df[df['Image'] == '8K']
+
+# Get values
+impls_4k = df_4k['Implementation'].values
+times_4k = df_4k['Time_ms'].values.astype(float)
+speedups_4k = df_4k['Speedup'].values.astype(float)
+
+impls_8k = df_8k['Implementation'].values
+times_8k = df_8k['Time_ms'].values.astype(float)
+speedups_8k = df_8k['Speedup'].values.astype(float)
+
+print(f"  4K: {len(impls_4k)} entries")
+print(f"  8K: {len(impls_8k)} entries")
+
+# ============================================
+# PLOT 1: Speedup Comparison
+# ============================================
+print("  [1/5] Speedup comparison...")
+
+fig, ax = plt.subplots(figsize=(12, 6))
+x = np.arange(len(impls_4k))
+width = 0.35
+
+bars1 = ax.bar(x - width/2, speedups_4k, width, label='4K', color='#3498db', alpha=0.8)
+bars2 = ax.bar(x + width/2, speedups_8k, width, label='8K', color='#e74c3c', alpha=0.8)
+
+ax.set_ylabel('Speedup (vs Sequential)', fontsize=12)
+ax.set_title('Speedup Comparison: 4K vs 8K', fontsize=14, fontweight='bold')
+ax.set_xticks(x)
+ax.set_xticklabels(impls_4k, rotation=45, ha='right')
+ax.legend(fontsize=11)
+ax.grid(True, alpha=0.3, axis='y')
+
+for bars in [bars1, bars2]:
+    for bar in bars:
+        height = bar.get_height()
+        if height > 0:
+            ax.text(bar.get_x() + bar.get_width()/2, height + 0.3,
+                    f'{height:.1f}x', ha='center', va='bottom', fontsize=9)
+
+plt.tight_layout()
+plt.savefig(f'{plots_dir}/speedup_comparison.png', dpi=150, bbox_inches='tight')
+plt.savefig(f'{plots_dir}/speedup_comparison.pdf', bbox_inches='tight')
+plt.close()
+print("    ✅ speedup_comparison.png")
+
+# ============================================
+# PLOT 2: Execution Time
+# ============================================
+print("  [2/5] Execution time...")
+
+fig, ax = plt.subplots(figsize=(12, 6))
+
+ax.plot(impls_4k, times_4k, 'o-', linewidth=2, markersize=10, 
+        label='4K', color='#3498db')
+ax.plot(impls_8k, times_8k, 's-', linewidth=2, markersize=10, 
+        label='8K', color='#e74c3c')
+
+ax.set_xlabel('Implementation', fontsize=12)
+ax.set_ylabel('Execution Time (ms)', fontsize=12)
+ax.set_title('Execution Time Comparison', fontsize=14, fontweight='bold')
+ax.set_yscale('log')
+ax.legend(fontsize=11)
+ax.grid(True, alpha=0.3, which='both')
+
+for i, (t4, t8) in enumerate(zip(times_4k, times_8k)):
+    if t4 > 0:
+        ax.text(i, t4 * 1.2, f'{t4:.0f}ms', ha='center', va='bottom', fontsize=8)
+    if t8 > 0:
+        ax.text(i, t8 * 0.8, f'{t8:.0f}ms', ha='center', va='top', fontsize=8)
+
+plt.xticks(rotation=45, ha='right')
+plt.tight_layout()
+plt.savefig(f'{plots_dir}/execution_time.png', dpi=150, bbox_inches='tight')
+plt.savefig(f'{plots_dir}/execution_time.pdf', bbox_inches='tight')
+plt.close()
+print("    ✅ execution_time.png")
+
+# ============================================
+# PLOT 3: Strong Scaling
+# ============================================
+print("  [3/5] Strong scaling...")
+
+omp_4k = df_4k[df_4k['Implementation'] == 'OpenMP']
+omp_8k = df_8k[df_8k['Implementation'] == 'OpenMP']
+
+if not omp_4k.empty:
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    threads_4k = omp_4k['Threads'].values
+    times_omp_4k = omp_4k['Time_ms'].values.astype(float)
+    threads_8k = omp_8k['Threads'].values if not omp_8k.empty else threads_4k
+    times_omp_8k = omp_8k['Time_ms'].values.astype(float) if not omp_8k.empty else times_omp_4k
+    
+    ax.plot(threads_4k, times_omp_4k, 'o-', linewidth=2, markersize=10,
+            label='4K (Measured)', color='#2ecc71')
+    if not omp_8k.empty:
+        ax.plot(threads_8k, times_omp_8k, 's-', linewidth=2, markersize=10,
+                label='8K (Measured)', color='#f39c12')
+    
+    # Ideal scaling
+    ideal_4k = [times_omp_4k[0] / (t / threads_4k[0]) for t in threads_4k]
+    ax.plot(threads_4k, ideal_4k, '--', linewidth=1.5, alpha=0.5,
+            label='Ideal Scaling', color='gray')
+    
+    ax.set_xlabel('Number of Threads', fontsize=12)
+    ax.set_ylabel('Execution Time (ms)', fontsize=12)
+    ax.set_title('OpenMP Strong Scaling', fontsize=14, fontweight='bold')
+    ax.set_xscale('log', base=2)
+    ax.set_yscale('log')
+    ax.legend(fontsize=11)
+    ax.grid(True, alpha=0.3, which='both')
+    
+    plt.tight_layout()
+    plt.savefig(f'{plots_dir}/strong_scaling.png', dpi=150, bbox_inches='tight')
+    plt.savefig(f'{plots_dir}/strong_scaling.pdf', bbox_inches='tight')
+    plt.close()
+    print("    ✅ strong_scaling.png")
+
+# ============================================
+# PLOT 4: Efficiency Heatmap
+# ============================================
+print("  [4/5] Efficiency heatmap...")
+
+if not omp_4k.empty and not omp_8k.empty:
+    eff_4k = omp_4k['Efficiency'].values.astype(float)
+    eff_8k = omp_8k['Efficiency'].values.astype(float)
+    
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    heatmap_data = np.array([eff_4k, eff_8k])
+    resolutions = ['4K', '8K']
+    thread_labels = [str(t) for t in omp_4k['Threads'].values]
+    
+    im = ax.imshow(heatmap_data, cmap='RdYlGn', aspect='auto', vmin=0, vmax=100)
+    
+    ax.set_xticks(np.arange(len(thread_labels)))
+    ax.set_yticks(np.arange(len(resolutions)))
+    ax.set_xticklabels(thread_labels)
+    ax.set_yticklabels(resolutions)
+    
+    for i in range(len(resolutions)):
+        for j in range(len(thread_labels)):
+            val = heatmap_data[i,j]
+            if not np.isnan(val) and val > 0:
+                text = ax.text(j, i, f'{val:.1f}%',
+                              ha="center", va="center", 
+                              color="black" if val > 50 else "white")
+    
+    ax.set_xlabel('Thread Count', fontsize=12)
+    ax.set_ylabel('Resolution', fontsize=12)
+    ax.set_title('OpenMP Efficiency Heatmap (%)', fontsize=14, fontweight='bold')
+    
+    plt.colorbar(im, ax=ax, label='Efficiency (%)')
+    plt.tight_layout()
+    plt.savefig(f'{plots_dir}/efficiency_heatmap.png', dpi=150, bbox_inches='tight')
+    plt.savefig(f'{plots_dir}/efficiency_heatmap.pdf', bbox_inches='tight')
+    plt.close()
+    print("    ✅ efficiency_heatmap.png")
+
+# ============================================
+# PLOT 5: CPU vs GPU
+# ============================================
+print("  [5/5] CPU vs GPU...")
+
+omp_16t_4k = df_4k[(df_4k['Implementation'] == 'OpenMP') & (df_4k['Threads'] == 16)]
+omp_16t_8k = df_8k[(df_8k['Implementation'] == 'OpenMP') & (df_8k['Threads'] == 16)]
+cuda_4k = df_4k[df_4k['Implementation'] == 'CUDA']
+cuda_8k = df_8k[df_8k['Implementation'] == 'CUDA']
+
+if not omp_16t_4k.empty and not cuda_4k.empty:
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    cpu_speedup = [
+        omp_16t_4k['Speedup'].values[0] if not omp_16t_4k.empty else 0,
+        omp_16t_8k['Speedup'].values[0] if not omp_16t_8k.empty else 0
+    ]
+    gpu_speedup = [
+        cuda_4k['Speedup'].values[0] if not cuda_4k.empty else 0,
+        cuda_8k['Speedup'].values[0] if not cuda_8k.empty else 0
+    ]
+    
+    categories = ['4K', '8K']
+    x = np.arange(len(categories))
+    width = 0.35
+    
+    bars1 = ax.bar(x - width/2, cpu_speedup, width, label='CPU (OpenMP 16T)', 
+                   color='#3498db', alpha=0.8)
+    bars2 = ax.bar(x + width/2, gpu_speedup, width, label='GPU (CUDA)', 
+                   color='#e74c3c', alpha=0.8)
+    
+    ax.set_xlabel('Image Resolution', fontsize=12)
+    ax.set_ylabel('Speedup vs Sequential', fontsize=12)
+    ax.set_title('CPU vs GPU Acceleration', fontsize=14, fontweight='bold')
+    ax.set_xticks(x)
+    ax.set_xticklabels(categories)
+    ax.legend(fontsize=11)
+    ax.grid(True, alpha=0.3, axis='y')
+    
+    for bars in [bars1, bars2]:
+        for bar in bars:
+            height = bar.get_height()
+            if height > 0:
+                ax.text(bar.get_x() + bar.get_width()/2, height + 0.3,
+                        f'{height:.1f}x', ha='center', va='bottom', fontsize=10)
+    
+    plt.tight_layout()
+    plt.savefig(f'{plots_dir}/cpu_vs_gpu.png', dpi=150, bbox_inches='tight')
+    plt.savefig(f'{plots_dir}/cpu_vs_gpu.pdf', bbox_inches='tight')
+    plt.close()
+    print("    ✅ cpu_vs_gpu.png")
+
+print(f"\n✅ All plots saved to: {plots_dir}")
+PYTHON
+
+# ============================================
+# STEP 5: CREATE SUMMARY
+# ============================================
+
+echo -e "\n[5/6] Creating summary..."
+
+cat > "${RESULTS_DIR}/summary_${TIMESTAMP}.txt" << EOF
+========================================
+  BENCHMARK SUMMARY
+  Run ID: ${TIMESTAMP}
+========================================
+
+HARDWARE:
+- GPU: Tesla V100-SXM2-16GB
+- CPU: $(nproc) cores
+- RAM: $(free -h | grep Mem | awk '{print $2}')
+
+PERFORMANCE RESULTS:
+
+4K (3840x2160):
+  Sequential: ${SEQ_4K} ms
+  OpenMP 16T: ${OMP_4K[16]} ms
+  CUDA: ${CUDA_4K} ms
+  CUDA Speedup: $(echo "scale=2; ${SEQ_4K}/${CUDA_4K}" | bc -l 2>/dev/null || echo "N/A")x
+
+8K (7680x4320):
+  Sequential: ${SEQ_8K} ms
+  OpenMP 16T: ${OMP_8K[16]} ms
+  CUDA: ${CUDA_8K} ms
+  CUDA Speedup: $(echo "scale=2; ${SEQ_8K}/${CUDA_8K}" | bc -l 2>/dev/null || echo "N/A")x
+
+FILES GENERATED:
+- CSV Data: ${CSV_FILE}
+- Plots: ${PLOTS_DIR}/
+- Output Images: datasets/output/
+
+========================================
+EOF
+
+echo "  ✅ Summary saved"
+
+# ============================================
+# STEP 6: FINAL OUTPUT
+# ============================================
+
+echo -e "\n[6/6] Complete!"
+
+echo -e "\n=========================================="
+echo "  ✅ BENCHMARK + PLOTS COMPLETE!"
+echo "=========================================="
+echo ""
+echo "Run ID: ${TIMESTAMP}"
+echo ""
+echo "Results saved in:"
+echo "  📊 CSV: ${CSV_FILE}"
+echo "  📈 Plots: ${PLOTS_DIR}/"
+echo "  📁 Images: datasets/output/"
+echo ""
+echo "Plots generated:"
+ls -lh "${PLOTS_DIR}"/*.png 2>/dev/null | awk '{print "  - " $9 " (" $5 ")"}'
+echo ""
+echo "Performance Summary:"
+echo "  CUDA Speedup (4K): $(echo "scale=2; ${SEQ_4K}/${CUDA_4K}" | bc -l 2>/dev/null || echo "N/A")x"
+echo "  CUDA Speedup (8K): $(echo "scale=2; ${SEQ_8K}/${CUDA_8K}" | bc -l 2>/dev/null || echo "N/A")x"
+echo ""
+echo "To view plots:"
+echo "  display ${PLOTS_DIR}/speedup_comparison.png"
+echo "=================completed========================="
+
+

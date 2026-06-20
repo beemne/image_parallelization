@@ -1,1 +1,33 @@
-/datasets/outputs/*
+# Build artifacts
+/build/
+/CMakeFiles/
+/CMakeCache.txt
+/cmake_install.cmake
+/*.cmake
+
+# Generated binaries and intermediate files
+*.o
+*.obj
+*.exe
+*.out
+*.log
+
+# Generated image outputs
+output.ppm
+test.ppm
+*.ppm
+
+# Generated reports, plots, results
+/results/
+/outputs_*/
+/plots_*/
+/report_*/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Editor and OS files
+.vscode/
+.DS_Store
+Thumbs.db
